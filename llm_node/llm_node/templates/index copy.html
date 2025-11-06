@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>채팅 서비스</title>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
+  <style>
+    html, body { margin:0; padding:0; width:100%; height:100%; background:#f5f6f7; font-family:'Noto Sans KR', Arial, sans-serif; color:#222; overflow:hidden; }
+    #robotChatScreen { position:relative; width:100%; height:100%; display:flex; align-items:center; justify-content:center; }
+    .chat-bg { position:fixed; top:0; left:0; width:100vw; height:100vh; object-fit:cover; opacity:0.36; z-index:0; pointer-events:none; }
+    .chat-container { position:relative; z-index:1; width:100%; max-width:520px; height:90vh; max-height:800px; background:rgba(255,255,255,0.85); backdrop-filter:blur(10px); border-radius:22px; box-shadow:0 4px 32px rgba(0,0,0,0.1); display:flex; flex-direction:column; overflow:hidden; }
+    .chat-header { padding:20px 22px 18px 22px; font-size:1.2rem; font-weight:bold; border-bottom:1px solid #e8e8e8; }
+    .chat-messages { flex:1 1 0; overflow-y:auto; padding:16px 12px 8px 12px; display:flex; flex-direction:column; gap:12px; }
+    .message-row { display:flex; align-items:flex-end; }
+    .message { padding:11px 16px; font-size:1rem; line-height:1.4; max-width:75%; word-wrap:break-word; }
+    .message.you { margin-left:auto; background:#ffe34d; color:#252525; border-radius:18px 18px 5px 18px; }
+    .message.bot { margin-right:auto; background:#f8f8fa; color:#222; border-radius:18px 18px 18px 5px; border:1.2px solid #e2e2ea; }
+    .chat-inputbar { padding:12px; background:#f7f7f8; display:flex; gap:10px; border-top:1px solid #e4e3e8; align-items:center; }
+    .chat-input { flex:1 1 0; border:1px solid #ddd; border-radius:18px; padding:12px 16px; font-size:1rem; background:#fff; color:#222; outline:none; transition:border-color .2s; }
+    .chat-input:focus { border-color:#ffcb03; }
+    .send-btn { background:#ffde3b; color:#333; border:none; border-radius:50%; width:44px; height:44px; font-weight:bold; cursor:pointer; font-size:1.3rem; display:flex; align-items:center; justify-content:center; transition:background .15s; }
+    .send-btn:hover { background:#ffcb03; }
+    .stt-toggle { display:flex; align-items:center; margin-left:4px; }
+    .stt-toggle input { display:none; }
+    .stt-toggle label { position:relative; width:48px; height:28px; border:1px solid #ddd; border-radius:999px; cursor:pointer; background:#f1f1f4; display:inline-block; }
+    .stt-toggle .mic { position:absolute; top:2px; left:2px; width:24px; height:24px; line-height:24px; text-align:center; font-size:14px; background:#fff; border:1px solid #ddd; border-radius:50%; transition:left .18s ease; }
+    .stt-toggle input:checked + label { background:#ffde3b; border-color:#ffde3b; }
+    .stt-toggle input:checked + label .mic { left:22px; }
+    @media (max-width:540px){ .chat-container{ width:100vw; height:100vh; max-height:100%; border-radius:0; box-shadow:none; } }
+  </style>
+</head>
+<body>
+  <div id="robotChatScreen">
+    <img class="chat-bg" src="{{ url_for('static', filename='s1.png') }}" alt="채팅 배경" onerror="this.style.display='none'">
+    <div class="chat-container">
+      <div class="chat-header"><span>채팅 서비스</span></div>
+      <div class="chat-messages" id="chatMessages">
+        <div class="message-row"><div class="message bot">안녕하세요! 무엇을 도와드릴까요?</div></div>
+      </div>
+
+      <form class="chat-inputbar" id="chatForm" autocomplete="off">
+        <input type="text" class="chat-input" id="chatInput" placeholder="메시지를 입력하세요..." required />
+        <button type="submit" class="send-btn">▶</button>
+        <div class="stt-toggle">
+          <input type="checkbox" id="sttSwitch" />
+          <label for="sttSwitch" title="STT On/Off"><span class="mic">🎤</span></label>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js" crossorigin="anonymous"></script>
+  <script>
+    const chatForm = document.getElementById('chatForm');
+    const chatInput = document.getElementById('chatInput');
+    const chatMessages = document.getElementById('chatMessages');
+    const sttSwitch = document.getElementById('sttSwitch');
+    const STT_SECONDS = 5;
+
+    // --- Socket.IO 수신 ---
+    const sock = io();
+    sock.on('system_status', (p) => console.log('system', p));
+
+    // /tool_chat/in → you 말풍선
+    sock.on('incoming_text', (p) => {
+      const t = (p && p.text ? String(p.text) : '').trim();
+      if (t) appendMessage('you', t);
+    });
+
+    // /tool_chat/out → bot 말풍선
+    sock.on('external_chat_response', (p) => { if (p && p.response) appendMessage('bot', p.response); });
+
+    // 도구 감지는 로그만
+    sock.on('tool_detection', (p) => console.log('tool', p));
+
+    // STT 결과 표시
+    sock.on('stt_result', (p) => {
+      const text = (p && p.recognized_text ? String(p.recognized_text) : '').trim();
+      if (text) appendMessage('you', text);
+      else appendMessage('bot', '음성을 인식하지 못했습니다.');
+    });
+
+    // --- 폼 전송(HTTP) ---
+    chatForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const userMessage = chatInput.value.trim();
+      if (!userMessage) return;
+      appendMessage('you', userMessage);     // 직접 입력은 즉시 표시
+      chatInput.value = '';
+      try {
+        await fetch('/chat', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({ message:userMessage })
+        }).then(r=>r.json()).catch(()=>({}));
+        // 봇 답변은 external_chat_response로 온다
+      } catch {
+        appendMessage('bot', '서버 통신 오류');
+      }
+    });
+
+    function appendMessage(type, text) {
+      const row = document.createElement('div'); row.className = 'message-row';
+      const msg = document.createElement('div'); msg.className = 'message ' + type; msg.textContent = text;
+      row.appendChild(msg); chatMessages.appendChild(row); chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+
+    async function fetchJSON(url, opt) {
+      const r = await fetch(url, opt || {}); if (!r.ok) throw new Error(String(r.status));
+      const ct = r.headers.get('content-type') || ''; return ct.includes('application/json') ? r.json() : {};
+    }
+
+    // --- STT 폴링 디바운싱/백오프 ---
+    let pollTimer=null, polling=false, sttStarting=false, backoffMs=1000;
+    async function startSTT() {
+      if (sttStarting) return;
+      sttStarting = true;
+      try {
+        await fetchJSON('/stt/start', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ duration:STT_SECONDS }) });
+        backoffMs = 1000;
+      } catch { backoffMs = Math.min(backoffMs*2, 15000); }
+      sttStarting = false;
+    }
+    async function pollStatus() {
+      if (polling) return;
+      polling = true;
+      try {
+        const s = await fetchJSON('/status');
+        const rec = !!(s.stt_info && s.stt_info.recording);
+        if (sttSwitch.checked && !rec) await startSTT();
+        scheduleNext(backoffMs);
+      } catch {
+        backoffMs = Math.min(backoffMs*2, 15000);
+        scheduleNext(backoffMs);
+      } finally { polling = false; }
+    }
+    function scheduleNext(ms){ clearTimeout(pollTimer); pollTimer=setTimeout(()=>{ if(document.visibilityState==='visible') pollStatus(); }, ms); }
+    sttSwitch.addEventListener('change', ()=>{ if (sttSwitch.checked) startSTT(); });
+    document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible') scheduleNext(200); else clearTimeout(pollTimer); });
+    window.addEventListener('beforeunload', ()=> clearTimeout(pollTimer));
+    scheduleNext(400);
+  </script>
+</body>
+</html>
